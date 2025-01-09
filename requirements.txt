@@ -10,3 +10,4 @@ llama-index-vector-stores-qdrant>=0.4.2
 requests
 streamlit
 PyPDF2
+python-multipart 

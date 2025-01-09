@@ -195,9 +195,9 @@ def list_curricula():
     try:
         collections = qdrant_client.get_collections()
         collection_list = [c.name for c in collections.collections]
-        return {"collections": collection_list}
+        return {"status": "success", "collections": collection_list}
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "detail": str(e)}
 
 @app.post("/upload")
 def upload_pdf(file: UploadFile = File(...)):
@@ -241,17 +241,19 @@ def query_curriculum(question: str):
     """
     global GLOBAL_AGENT
     if not GLOBAL_AGENT:
-        return {"error": "Agent not initialized"}
+        return {"status": "error", "detail": "Agent not initialized"}
     response = GLOBAL_AGENT.chat(question)
-    return {"answer": str(response)}
+    return {"status": "success", "answer": str(response)}
 
-# === Endpoints for Step-by-Step Course Creation ===
+
+# === Step-by-Step Course Creation Endpoints ===
 
 @app.post("/create_course_outline")
 def create_course_outline(
     title: str = Body(...),
     short_desc: str = Body(...),
-    duration_weeks: int = Body(...)
+    duration_weeks: int = Body(...),
+    curriculum: str = Body(default="General Knowledge"),
 ):
     """
     Creates a high-level course outline in JSON format.
@@ -259,10 +261,10 @@ def create_course_outline(
     """
     global GLOBAL_AGENT
     if not GLOBAL_AGENT:
-        return {"error": "Agent not initialized. Upload a PDF first if needed."}
+        return {"status": "error", "detail": "Agent not initialized. Upload a PDF first if needed."}
 
     outline_prompt = (
-        f"You are an instructional designer. Generate a JSON outline for a course:\n\n"
+        "You are an instructional designer. Generate a JSON outline for a course:\n\n"
         f"Title: {title}\n"
         f"Description: {short_desc}\n"
         f"Duration: {duration_weeks} weeks (each week = 1 module).\n\n"
@@ -299,7 +301,17 @@ def create_course_outline(
 
     # Store in memory
     OUTLINE_DB[outline_id] = outline_data
-    return {"outline_id": outline_id, "outline": outline_data}
+    # Set source based on selected curriculum
+    source = f"Curriculum: {curriculum}" if curriculum != "General Knowledge" else "General Knowledge"
+    
+    return {
+        "status": "success",
+        "data": {
+            "outline_id": outline_id,
+            "outline": outline_data,
+            "source": source
+        }
+    }
 
 
 @app.post("/approve_outline")
@@ -312,9 +324,9 @@ def approve_outline(
     We'll store the updated version in memory.
     """
     if outline_id not in OUTLINE_DB:
-        return {"error": "Outline ID not found"}
+        return {"status": "error", "detail": "Outline ID not found"}
     OUTLINE_DB[outline_id] = updated_outline
-    return {"status": "approved", "final_outline": updated_outline}
+    return {"status": "success", "final_outline": updated_outline}
 
 
 @app.post("/generate_lesson")
@@ -329,16 +341,16 @@ def generate_lesson(
     """
     global GLOBAL_AGENT
     if not GLOBAL_AGENT:
-        return {"error": "Agent not initialized"}
+        return {"status": "error", "detail": "Agent not initialized"}
 
     if outline_id not in OUTLINE_DB:
-        return {"error": "Invalid outline_id"}
+        return {"status": "error", "detail": "Invalid outline_id"}
     outline_data = OUTLINE_DB[outline_id]
 
     # Grab the module info
     modules = outline_data.get("modules", [])
     if module_index < 0 or module_index >= len(modules):
-        return {"error": "module_index out of range"}
+        return {"status": "error", "detail": "module_index out of range"}
     module_info = modules[module_index]
 
     # Prompt the agent
@@ -386,6 +398,41 @@ def generate_lesson(
     return {"status": "success", "lesson": lesson_data, "updated_outline": outline_data}
 
 
+@app.get("/propose_lesson_prompt")
+def propose_lesson_prompt(outline_id: str, module_number: int):
+    """
+    Generate a short 'proposed lesson idea' for a given module (1-based).
+    Returns something like:
+      { "proposed_idea": "Cover advanced OOP with hands-on examples." }
+    """
+    global GLOBAL_AGENT
+    if not GLOBAL_AGENT:
+        return {"status": "error", "detail": "Agent not initialized"}
+
+    if outline_id not in OUTLINE_DB:
+        return {"status": "error", "detail": "Invalid outline_id"}
+
+    # Convert module_number to 0-based index
+    mod_idx = module_number - 1
+    outline_data = OUTLINE_DB[outline_id]
+    modules = outline_data.get("modules", [])
+    if mod_idx < 0 or mod_idx >= len(modules):
+        return {"status": "error", "detail": "module_number out of range"}
+
+    module_title = modules[mod_idx].get("module_title", "Untitled Module")
+
+    # Build a prompt to propose a single-sentence lesson idea
+    proposal_prompt = (
+        f"You are an expert instructional designer. Suggest one short lesson idea for the "
+        f"module '{module_title}'. Provide just one concise sentence describing the lesson focus."
+    )
+
+    resp = GLOBAL_AGENT.chat(proposal_prompt)
+    proposed_idea = str(resp).strip()
+
+    return {"status": "success", "proposed_idea": proposed_idea}
+
+
 @app.get("/debug_collection")
 def debug_collection(collection_name: str):
     """
@@ -405,12 +452,13 @@ def debug_collection(collection_name: str):
                     seen_files.add(fname)
                     documents.append({"id": point.id, "file_name": fname})
         return {
+            "status": "success",
             "collection_info": str(collection_info),
             "num_points": len(points),
             "documents": documents
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "detail": str(e)}
 
 # Optional: If you want a “generate_course” from all docs
 # We keep your original function for reference.
@@ -423,7 +471,7 @@ def generate_course(collection_name: str):
     try:
         points = qdrant_client.scroll(collection_name=collection_name, limit=200, with_payload=True, with_vectors=False)[0]
         if not points:
-            return {"error": "No content found in collection."}
+            return {"status": "error", "detail": "No content found in collection"}
 
         vector_store = QdrantVectorStore(client=qdrant_client, collection_name=collection_name)
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
@@ -438,9 +486,8 @@ def generate_course(collection_name: str):
 
         # Or do something simpler with an agent or a structured LLM.
         # For now, let's just do something trivial:
-        # This is your original method:
         try:
-            llm = OpenAI(model="gpt-3.5-turbo", temperature=0.2)
+            llm = OpenAI(model="gpt-4", temperature=0.2)
             sllm = llm.as_structured_llm(CurriculumStructure)
 
             query_engine = collection_index.as_query_engine()
@@ -448,11 +495,12 @@ def generate_course(collection_name: str):
             response = sllm.complete(str(content))
             if not response.raw:
                 raise ValueError("No structure generated")
-            return response.raw.dict()
+            return {"status": "success", "data": response.raw.dict()}
         except Exception as e:
             return {
-                "error": str(e),
+                "status": "error",
+                "detail": str(e),
                 "fallback": "No structured data could be generated."
             }
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "detail": str(e)}
