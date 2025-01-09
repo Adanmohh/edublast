@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+
+llama-index==0.12.10  # or the latest stable version you prefer
+openai>=1.59.5
+qdrant-client>=1.12.2
+
+requests
+streamlit
+PyPDF2
